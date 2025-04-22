@@ -50,7 +50,7 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
 
     def _setup_ui(self):
         self.setWindowTitle("Resource Pack Mixer")
-        self.resize(900, 700)
+        self.resize(1500, 1080)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -101,8 +101,8 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         self.list_widget = QtWidgets.QWidget()
         self.list_layout = QtWidgets.QVBoxLayout(self.list_widget)
         self.list_layout.setAlignment(QtCore.Qt.AlignTop)
-        self.list_layout.setSpacing(2)
         self.list_layout.setContentsMargins(2, 2, 2, 2)
+        self.list_layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         self.scroll_area.setWidget(self.list_widget)
 
     def _start_map_loading(self):
@@ -162,7 +162,6 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
                 continue
             entries = self.texture_map[rel]
             self._add_row(rel, entries)
-        self.list_layout.addStretch()
 
     def _on_search(self):
         term = self.search_input.text().lower()
@@ -215,7 +214,7 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
             return QtGui.QPixmap.fromImage(reader.read())
 
     def _add_row(self, rel_path: str, entries):
-        row_name = rel_path.replace('assets/minecraft/', '').replace('textures/', '')
+        row_name = rel_path.split('/')[-1]
         print(f'Render row: {rel_path}')
         row = ClickableWidget()
         row.setContentsMargins(0, 0, 0, 10)
@@ -223,11 +222,17 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         row.setProperty("entries", entries)
         row.clicked.connect(lambda rp=rel_path, e=entries: self._open_preview(rp, e))
         hbox = QtWidgets.QHBoxLayout(row)
+        row.setMinimumHeight(200)
         hbox.setAlignment(QtCore.Qt.AlignLeft)
         hbox.setContentsMargins(0, 0, 0, 0)
 
         label = QtWidgets.QLabel(row_name)
         label.setFixedWidth(300)
+        label.setStyleSheet(
+            "font-size: 20px;"
+        )
+        label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        label.setToolTip(str(Path(self.mix_dir) / rel_path))
         hbox.addWidget(label)
 
         group = QtWidgets.QButtonGroup(self)
@@ -236,17 +241,24 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         dst_file = Path(self.output_dir) / rel_path
         for pack_name, full in entries:
             btn = QtWidgets.QToolButton()
-            pix = self._load_pixmap(str(full)).scaled(
-                48, 48, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
-            )
-            btn.setIcon(QtGui.QIcon(pix))
+            btn.setMinimumSize(200, 200)
+            btn.setMaximumSize(200, 200)
+            btn.setFixedSize(200, 200)
+            orig_pix = self._load_pixmap(str(full))
+            scaled_pix = orig_pix.scaledToHeight(btn.height(), QtCore.Qt.FastTransformation)
+            btn.setIcon(QtGui.QIcon(scaled_pix))
+            btn.setIconSize(scaled_pix.size())
             btn.setStyleSheet(
+                "QToolButton {"
                 "background-color:#333;"
                 "color:#fff;"
                 "outline:none;"
                 "border:none;"
+                "}"
+                "QToolButton:checked {"
+                "border: 5px solid #f36;"
+                "}"
             )
-            btn.setIconSize(QtCore.QSize(48, 48))
             btn.setCheckable(True)
             btn.setToolTip(pack_name)
             btn.setProperty("full_path", str(full))
@@ -256,7 +268,6 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
                 btn.setChecked(True)
             group.addButton(btn)
             hbox.addWidget(btn)
-
         self.list_layout.addWidget(row)
 
     def _on_texture_selected(self, checked: bool):
@@ -283,7 +294,20 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         hbox.setAlignment(QtCore.Qt.AlignLeft)
         content.setLayout(hbox)
         scroll.setWidget(content)
-        dlg.resize(600, 200)
+        count = len(entries)
+        if count <= 1:
+            w = 500
+            h = 510
+        elif 1 < count <= 2:
+            w = 1000
+            h = 510
+        elif 2 < count <= 4:
+            w = 1500
+            h = 510
+        else:
+            w = 1920
+            h = 300
+        dlg.resize(w, h)
         dlg._btns: list[PixmapButton] = []
         for pack_name, full in entries:
             btn = PixmapButton()
@@ -301,7 +325,7 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
             for b in dlg._btns:
                 p = b.orig_pixmap.scaled(size, size,
                                          QtCore.Qt.KeepAspectRatio,
-                                         QtCore.Qt.SmoothTransformation)
+                                         QtCore.Qt.FastTransformation)
                 b.setIcon(QtGui.QIcon(p))
                 b.setIconSize(QtCore.QSize(p.width(), p.height()))
             super(QtWidgets.QDialog, dlg).resizeEvent(event)
