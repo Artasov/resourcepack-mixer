@@ -1,13 +1,36 @@
-import os
-import shutil
 import filecmp
+import os
 import pickle
+import shutil
 from pathlib import Path
 
-from PyQt5 import QtWidgets, QtGui, QtCore
 from PIL import Image
+from PyQt5 import QtWidgets, QtGui, QtCore
 
 from src.mixer.services.mixing_map import load_texture_map, build_texture_map
+
+
+class ClickableWidget(QtWidgets.QWidget):
+    clicked = QtCore.pyqtSignal()
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class PixmapButton(QtWidgets.QToolButton):
+    orig_pixmap: QtGui.QPixmap
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.orig_pixmap = QtGui.QPixmap()
+
+
+class PreviewDialog(QtWidgets.QDialog):
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.close()
 
 
 class ResourcePackMixin(QtWidgets.QMainWindow):
@@ -18,32 +41,69 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         self.pkl_path = mix_dir / "mix_map.pkl"
         os.makedirs(self.mix_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
-        self.texture_map = {}
+        self.texture_map: dict[str, list[tuple[str, Path]]] = {}
+        self.search_matches: list[int] = []
+        self.search_index: int = 0
+
         self._setup_ui()
         self._start_map_loading()
 
     def _setup_ui(self):
         self.setWindowTitle("Resource Pack Mixer")
-        self.resize(800, 600)
+        self.resize(900, 700)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         vbox = QtWidgets.QVBoxLayout(central)
+        vbox.setSpacing(5)
+        vbox.setContentsMargins(5, 5, 5, 5)
 
-        hbox = QtWidgets.QHBoxLayout()
+        # поиск и фильтр
+        hbox_search = QtWidgets.QHBoxLayout()
+        self.search_input = QtWidgets.QLineEdit()
+        self.search_input.setPlaceholderText("Поиск…")
+        self.search_input.returnPressed.connect(self._on_search)
+        hbox_search.addWidget(self.search_input)
+
+        self.search_button = QtWidgets.QPushButton("Поиск")
+        self.search_button.clicked.connect(self._on_search_button)
+        hbox_search.addWidget(self.search_button)
+
+        self.prev_button = QtWidgets.QPushButton("↑")
+        self.prev_button.setFixedWidth(30)
+        self.prev_button.clicked.connect(self._on_search_prev)
+        hbox_search.addWidget(self.prev_button)
+
+        self.next_button = QtWidgets.QPushButton("↓")
+        self.next_button.setFixedWidth(30)
+        self.next_button.clicked.connect(self._on_search_next)
+        hbox_search.addWidget(self.next_button)
+
+        self.filter_checkbox = QtWidgets.QCheckBox("Показывать только не выбранные")
+        self.filter_checkbox.stateChanged.connect(self._populate_rows)
+        hbox_search.addWidget(self.filter_checkbox)
+        hbox_search.addStretch()
+        vbox.addLayout(hbox_search)
+
+        # пересоздание карты
+        hbox_rescan = QtWidgets.QHBoxLayout()
         self.rescan_button = QtWidgets.QPushButton("Пересоздать карту")
         self.rescan_button.clicked.connect(self._on_rescan_clicked)
-        hbox.addWidget(self.rescan_button)
-        hbox.addStretch()
-        vbox.addLayout(hbox)
+        hbox_rescan.addWidget(self.rescan_button)
+        hbox_rescan.addStretch()
+        vbox.addLayout(hbox_rescan)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        vbox.addWidget(scroll)
+        # список текстур
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        vbox.addWidget(self.scroll_area)
 
         self.list_widget = QtWidgets.QWidget()
         self.list_layout = QtWidgets.QVBoxLayout(self.list_widget)
-        scroll.setWidget(self.list_widget)
+        self.list_layout.setAlignment(QtCore.Qt.AlignTop)
+        self.list_layout.setSpacing(2)
+        self.list_layout.setContentsMargins(2, 2, 2, 2)
+        self.scroll_area.setWidget(self.list_widget)
 
     def _start_map_loading(self):
         if self.pkl_path.exists():
@@ -61,15 +121,16 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         self._close_loading_dialog()
 
     def _show_loading_dialog(self):
-        self.loading_dialog = QtWidgets.QDialog(self)
-        self.loading_dialog.setWindowTitle("Сканирование ресурсов")
-        self.loading_dialog.setModal(True)
-        layout = QtWidgets.QVBoxLayout(self.loading_dialog)
-        layout.addWidget(QtWidgets.QLabel("Идёт сканирование MixDir..."))
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Сканирование ресурсов")
+        dlg.setModal(True)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        layout.addWidget(QtWidgets.QLabel("Идёт сканирование MixDir…"))
         bar = QtWidgets.QProgressBar()
         bar.setRange(0, 0)
         layout.addWidget(bar)
-        self.loading_dialog.resize(300, 100)
+        dlg.resize(300, 100)
+        self.loading_dialog = dlg
         self.loading_dialog.show()
 
     def _close_loading_dialog(self):
@@ -95,9 +156,53 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
 
     def _populate_rows(self):
         self._clear_rows()
-        for rel_path, entries in sorted(self.texture_map.items()):
-            self._add_row(rel_path, entries)
+        self.rel_list = sorted(self.texture_map.keys())
+        for rel in self.rel_list:
+            if self.filter_checkbox.isChecked() and (Path(self.output_dir) / rel).exists():
+                continue
+            entries = self.texture_map[rel]
+            self._add_row(rel, entries)
         self.list_layout.addStretch()
+
+    def _on_search(self):
+        term = self.search_input.text().lower()
+        self.search_matches = []
+        for i in range(self.list_layout.count()):
+            item = self.list_layout.itemAt(i)
+            w = item.widget()
+            if not w:
+                continue
+            rel = w.property("rel_path")
+            if term in rel.lower():
+                self.search_matches.append(i)
+        if self.search_matches:
+            self.search_index = 0
+            self._scroll_to_match()
+
+    def _on_search_next(self):
+        if not self.search_matches:
+            return
+        self.search_index = (self.search_index + 1) % len(self.search_matches)
+        self._scroll_to_match()
+
+    def _on_search_prev(self):
+        if not self.search_matches:
+            return
+        self.search_index = (self.search_index - 1) % len(self.search_matches)
+        self._scroll_to_match()
+
+    def _on_search_button(self):
+        if not self.search_matches:
+            self._on_search()
+        else:
+            self._on_search_next()
+
+    def _scroll_to_match(self):
+        idx = self.search_matches[self.search_index]
+        item = self.list_layout.itemAt(idx)
+        w = item.widget()
+        if w:
+            self.scroll_area.ensureWidgetVisible(w)
 
     def _load_pixmap(self, filepath: str) -> QtGui.QPixmap:
         try:
@@ -105,17 +210,23 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
             data = img.tobytes("raw", "RGBA")
             qimg = QtGui.QImage(data, img.width, img.height, QtGui.QImage.Format_RGBA8888)
             return QtGui.QPixmap.fromImage(qimg)
-        except Exception:
+        except:
             reader = QtGui.QImageReader(filepath)
-            image = reader.read()
-            return QtGui.QPixmap.fromImage(image)
+            return QtGui.QPixmap.fromImage(reader.read())
 
     def _add_row(self, rel_path: str, entries):
-        row = QtWidgets.QWidget()
+        row_name = rel_path.replace('assets/minecraft/', '').replace('textures/', '')
+        print(f'Render row: {rel_path}')
+        row = ClickableWidget()
+        row.setContentsMargins(0, 0, 0, 10)
+        row.setProperty("rel_path", rel_path)
+        row.setProperty("entries", entries)
+        row.clicked.connect(lambda rp=rel_path, e=entries: self._open_preview(rp, e))
         hbox = QtWidgets.QHBoxLayout(row)
         hbox.setAlignment(QtCore.Qt.AlignLeft)
+        hbox.setContentsMargins(0, 0, 0, 0)
 
-        label = QtWidgets.QLabel(rel_path)
+        label = QtWidgets.QLabel(row_name)
         label.setFixedWidth(300)
         hbox.addWidget(label)
 
@@ -125,10 +236,16 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         dst_file = Path(self.output_dir) / rel_path
         for pack_name, full in entries:
             btn = QtWidgets.QToolButton()
-            pixmap = self._load_pixmap(str(full)).scaled(
+            pix = self._load_pixmap(str(full)).scaled(
                 48, 48, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
             )
-            btn.setIcon(QtGui.QIcon(pixmap))
+            btn.setIcon(QtGui.QIcon(pix))
+            btn.setStyleSheet(
+                "background-color:#333;"
+                "color:#fff;"
+                "outline:none;"
+                "border:none;"
+            )
             btn.setIconSize(QtCore.QSize(48, 48))
             btn.setCheckable(True)
             btn.setToolTip(pack_name)
@@ -153,3 +270,41 @@ class ResourcePackMixin(QtWidgets.QMainWindow):
         else:
             if dst.exists():
                 dst.unlink()
+
+    def _open_preview(self, rel_path: str, entries):
+        dlg = PreviewDialog(self)
+        dlg.setWindowTitle(rel_path)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+        content = QtWidgets.QWidget()
+        hbox = QtWidgets.QHBoxLayout(content)
+        hbox.setAlignment(QtCore.Qt.AlignLeft)
+        content.setLayout(hbox)
+        scroll.setWidget(content)
+        dlg.resize(600, 200)
+        dlg._btns: list[PixmapButton] = []
+        for pack_name, full in entries:
+            btn = PixmapButton()
+            pixmap = self._load_pixmap(str(full))
+            btn.orig_pixmap = pixmap
+            btn.setIcon(QtGui.QIcon(pixmap))
+            btn.setIconSize(QtCore.QSize(pixmap.width(), pixmap.height()))
+            btn.setToolTip(pack_name)
+            hbox.addWidget(btn)
+            dlg._btns.append(btn)
+
+        def on_resize(event):
+            new_h = dlg.height() - 50
+            size = min(new_h, 512)
+            for b in dlg._btns:
+                p = b.orig_pixmap.scaled(size, size,
+                                         QtCore.Qt.KeepAspectRatio,
+                                         QtCore.Qt.SmoothTransformation)
+                b.setIcon(QtGui.QIcon(p))
+                b.setIconSize(QtCore.QSize(p.width(), p.height()))
+            super(QtWidgets.QDialog, dlg).resizeEvent(event)
+
+        dlg.resizeEvent = on_resize
+        dlg.exec_()
